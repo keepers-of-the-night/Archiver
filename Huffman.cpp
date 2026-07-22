@@ -5,6 +5,42 @@
 #include <queue>
 #include <vector>
 #include <iomanip>
+#include <cstdint>
+#include <unordered_map>
+
+using CodeTable = std::unordered_map<unsigned char, std::string>;
+
+class BitWriter{
+private:
+    std::ofstream& out;
+    unsigned char buffer;
+    int bitCount;
+
+public:
+    BitWriter(std::ofstream& output) : out(output), buffer(0), bitCount(0){}
+
+    void writeBit(int bit){
+        buffer |= (bit & 1) << bitCount;
+        bitCount++;
+        if(bitCount == 8){
+            flush();
+        }
+    }
+
+    void writeCode(const std::string& code){
+        for(char ch : code){
+            writeBit(ch == '1' ? 1 : 0);
+        }
+    }
+
+    void flush(){
+        if(bitCount > 0){
+            out.write(reinterpret_cast<const char*>(&buffer), 1);
+            buffer = 0;
+            bitCount = 0;
+        }
+    }
+};
 
 struct HuffmanNode{
     unsigned char symbol;
@@ -22,6 +58,18 @@ struct HuffmanNode{
         return left == nullptr && right == nullptr;
     }
 };
+
+void generateCodes(HuffmanNode* node, const std::string& prefix, CodeTable& table){
+    if(node == nullptr) return;
+
+    if(node->isLeaf()){
+        table[node->symbol] = prefix;
+        return;
+    }
+
+    generateCodes(node->left,  prefix + "0", table);
+    generateCodes(node->right, prefix + "1", table);
+}
 
 std::array<int, 256> countFrequencies(const std::string& filename){
     std::ifstream file(filename, std::ios::binary);
@@ -83,31 +131,62 @@ int main(int argc, char* argv[]){
         SetConsoleOutputCP(CP_UTF8);
         SetConsoleCP(CP_UTF8);
     #endif
-    
-    if(argc != 2){
-        std::cerr << "Использование: " << argv[0] << " <имя_файла>\n";
+
+    if(argc != 3){
+        std::cerr << "Использование: " << argv[0] << " <входной_файл> <выходной_сжатый>\n";
         return 1;
     }
-
-    std::string filename = argv[1];
+    std::string inputFile = argv[1];
+    std::string outputFile = argv[2];
 
     try{
-        auto freqMap = countFrequencies(filename);
+        auto freqMap = countFrequencies(inputFile);
 
         HuffmanNode* root = buildHuffmanTree(freqMap);
-
-        if(root == nullptr){
-            std::cout << "Файл пуст или не содержит данных. Дерево не построено.\n";
-            return 0;
+        if(!root){
+            std::cerr << "Файл пуст, сжатие невозможно.\n";
+            return 1;
         }
 
+        CodeTable codeTable;
+        generateCodes(root, "", codeTable);
 
-        std::cout << "\nДерево построено успешно!\n";
+        std::ofstream outFile(outputFile, std::ios::binary);
+        if(!outFile){
+            throw std::runtime_error("Не удалось создать выходной файл");
+        }
+
+        uint32_t magic = 0x48464D4E;
+        outFile.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+        uint8_t version = 1;
+        outFile.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+        for(int freq : freqMap){
+            outFile.write(reinterpret_cast<const char*>(&freq), sizeof(freq));
+        }
+
+        std::ifstream inFile(inputFile, std::ios::binary);
+        if(!inFile){
+            throw std::runtime_error("Не удалось повторно открыть входной файл");
+        }
+
+        BitWriter bitWriter(outFile);
+        unsigned char byte;
+        while (inFile.read(reinterpret_cast<char*>(&byte), 1)){
+            auto it = codeTable.find(byte);
+            if (it == codeTable.end()){
+                throw std::runtime_error("Не найден код для символа");
+            }
+            bitWriter.writeCode(it->second);
+        }
+
+        bitWriter.flush();
+
+        std::cout << "Сжатие завершено. Результат сохранён в " << outputFile << "\n";
 
     }catch (const std::exception& e){
         std::cerr << "Ошибка: " << e.what() << "\n";
         return 1;
     }
-
     return 0;
 }
