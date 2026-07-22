@@ -126,6 +126,13 @@ HuffmanNode* buildHuffmanTree(const std::array<int, 256>& freqMap){
     return minHeap.top();
 }
 
+void deleteTree(HuffmanNode* node){
+    if(node == nullptr) return;
+    deleteTree(node->left);
+    deleteTree(node->right);
+    delete node;
+}
+
 int main(int argc, char* argv[]){
     #ifdef _WIN32
         SetConsoleOutputCP(CP_UTF8);
@@ -156,8 +163,13 @@ int main(int argc, char* argv[]){
             throw std::runtime_error("Не удалось создать выходной файл");
         }
 
+        uint64_t originalSize = 0;
+        for(int& f : freqMap) originalSize += f;
+        outFile.write(reinterpret_cast<const char*>(&originalSize), sizeof(originalSize));
+
         uint32_t magic = 0x48464D4E;
         outFile.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+
         uint8_t version = 1;
         outFile.write(reinterpret_cast<const char*>(&version), sizeof(version));
 
@@ -181,6 +193,8 @@ int main(int argc, char* argv[]){
         }
 
         bitWriter.flush();
+        
+        deleteTree(root);
 
         std::cout << "Сжатие завершено. Результат сохранён в " << outputFile << "\n";
 
