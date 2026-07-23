@@ -6,6 +6,7 @@
 #include <vector>
 #include <iomanip>
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 
 using CodeTable = std::unordered_map<unsigned char, std::string>;
@@ -39,6 +40,27 @@ public:
             buffer = 0;
             bitCount = 0;
         }
+    }
+};
+
+class BitReader {
+private:
+    std::ifstream& in;
+    unsigned char buffer;
+    int bitPos;
+public:
+    BitReader(std::ifstream& input) : in(input), buffer(0), bitPos(8){}
+
+    int readBit(){
+        if(bitPos == 8){
+            if(!in.read(reinterpret_cast<char*>(&buffer), 1)){
+                return -1;
+            }
+            bitPos = 0;
+        }
+        int bit = (buffer >> bitPos) & 1;
+        bitPos++;
+        return bit;
     }
 };
 
@@ -133,72 +155,123 @@ void deleteTree(HuffmanNode* node){
     delete node;
 }
 
+void compress(const std::string& inputFile, const std::string& outputFile){
+    auto freqMap = countFrequencies(inputFile);
+    HuffmanNode* root = buildHuffmanTree(freqMap);
+    if(!root) throw std::runtime_error("Файл пуст, сжатие невозможно.");
+
+    CodeTable codeTable;
+    generateCodes(root, "", codeTable);
+
+    std::ofstream outFile(outputFile, std::ios::binary);
+    if(!outFile) throw std::runtime_error("Не удалось создать выходной файл");
+
+    uint64_t originalSize = 0;
+    for(int f : freqMap) originalSize += f;
+    outFile.write(reinterpret_cast<const char*>(&originalSize), sizeof(originalSize));
+
+    uint32_t magic = 0x48464D4E;
+    outFile.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    uint8_t version = 1;
+    outFile.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+    for (int f : freqMap){
+        outFile.write(reinterpret_cast<const char*>(&f), sizeof(f));
+    }
+
+    std::ifstream inFile(inputFile, std::ios::binary);
+    if(!inFile) throw std::runtime_error("Не удалось повторно открыть входной файл");
+
+    BitWriter bitWriter(outFile);
+    unsigned char byte;
+    while (inFile.read(reinterpret_cast<char*>(&byte), 1)){
+        auto it = codeTable.find(byte);
+        if(it == codeTable.end()) throw std::runtime_error("Не найден код для символа");
+        bitWriter.writeCode(it->second);
+    }
+    bitWriter.flush();
+
+    deleteTree(root);
+    std::cout << "Сжатие завершено. Результат: " << outputFile << "\n";
+}
+
+void decompress(const std::string& inputFile, const std::string& outputFile){
+    std::ifstream inFile(inputFile, std::ios::binary);
+    if(!inFile) throw std::runtime_error("Не удалось открыть сжатый файл: " + inputFile);
+
+    uint64_t originalSize;
+    inFile.read(reinterpret_cast<char*>(&originalSize), sizeof(originalSize));
+    if(!inFile) throw std::runtime_error("Ошибка чтения размера файла");
+
+    uint32_t magic;
+    inFile.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    if(magic != 0x48464D4E) throw std::runtime_error("Неверное магическое число, файл не является сжатым Хаффманом");
+
+    uint8_t version;
+    inFile.read(reinterpret_cast<char*>(&version), sizeof(version));
+    if(version != 1) throw std::runtime_error("Неподдерживаемая версия формата");
+
+    std::array<int, 256> freqMap{};
+    for(int i = 0; i < 256; ++i){
+        inFile.read(reinterpret_cast<char*>(&freqMap[i]), sizeof(int));
+        if(!inFile) throw std::runtime_error("Ошибка чтения таблицы частот");
+    }
+
+    HuffmanNode* root = buildHuffmanTree(freqMap);
+    if(!root) throw std::runtime_error("Ошибка восстановления дерева");
+
+    std::ofstream outFile(outputFile, std::ios::binary);
+    if(!outFile) throw std::runtime_error("Не удалось создать выходной файл: " + outputFile);
+
+    BitReader bitReader(inFile);
+    HuffmanNode* current = root;
+    uint64_t bytesWritten = 0;
+
+    while(bytesWritten < originalSize){
+        int bit = bitReader.readBit();
+        if(bit == -1) throw std::runtime_error("Неожиданный конец файла при декодировании");
+
+        if(bit == 0) current = current->left;
+        else current = current->right;
+
+        if(current->isLeaf()){
+            outFile.write(reinterpret_cast<const char*>(&current->symbol), 1);
+            bytesWritten++;
+            current = root;
+        }
+    }
+
+    deleteTree(root);
+    std::cout << "Распаковка завершена. Восстановлено " << bytesWritten << " байт в " << outputFile << "\n";
+}
+
 int main(int argc, char* argv[]){
     #ifdef _WIN32
         SetConsoleOutputCP(CP_UTF8);
         SetConsoleCP(CP_UTF8);
     #endif
 
-    if(argc != 3){
-        std::cerr << "Использование: " << argv[0] << " <входной_файл> <выходной_сжатый>\n";
+    if(argc < 4){
+        std::cerr << "Использование:\n"
+                  << "  Сжатие:   " << argv[0] << " -c <входной> <выходной>\n"
+                  << "  Распаковка: " << argv[0] << " -d <сжатый> <восстановленный>\n";
         return 1;
     }
-    std::string inputFile = argv[1];
-    std::string outputFile = argv[2];
+
+    std::string mode = argv[1];
+    std::string input = argv[2];
+    std::string output = argv[3];
 
     try{
-        auto freqMap = countFrequencies(inputFile);
-
-        HuffmanNode* root = buildHuffmanTree(freqMap);
-        if(!root){
-            std::cerr << "Файл пуст, сжатие невозможно.\n";
+        if (mode == "-c"){
+            compress(input, output);
+        } else if (mode == "-d"){
+            decompress(input, output);
+        } else{
+            std::cerr << "Неизвестный режим: " << mode << ". Используйте -c или -d.\n";
             return 1;
         }
-
-        CodeTable codeTable;
-        generateCodes(root, "", codeTable);
-
-        std::ofstream outFile(outputFile, std::ios::binary);
-        if(!outFile){
-            throw std::runtime_error("Не удалось создать выходной файл");
-        }
-
-        uint64_t originalSize = 0;
-        for(int& f : freqMap) originalSize += f;
-        outFile.write(reinterpret_cast<const char*>(&originalSize), sizeof(originalSize));
-
-        uint32_t magic = 0x48464D4E;
-        outFile.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
-
-        uint8_t version = 1;
-        outFile.write(reinterpret_cast<const char*>(&version), sizeof(version));
-
-        for(int freq : freqMap){
-            outFile.write(reinterpret_cast<const char*>(&freq), sizeof(freq));
-        }
-
-        std::ifstream inFile(inputFile, std::ios::binary);
-        if(!inFile){
-            throw std::runtime_error("Не удалось повторно открыть входной файл");
-        }
-
-        BitWriter bitWriter(outFile);
-        unsigned char byte;
-        while (inFile.read(reinterpret_cast<char*>(&byte), 1)){
-            auto it = codeTable.find(byte);
-            if (it == codeTable.end()){
-                throw std::runtime_error("Не найден код для символа");
-            }
-            bitWriter.writeCode(it->second);
-        }
-
-        bitWriter.flush();
-        
-        deleteTree(root);
-
-        std::cout << "Сжатие завершено. Результат сохранён в " << outputFile << "\n";
-
-    }catch (const std::exception& e){
+    } catch(const std::exception& e){
         std::cerr << "Ошибка: " << e.what() << "\n";
         return 1;
     }
